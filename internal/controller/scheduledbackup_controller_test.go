@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/robfig/cron"
@@ -525,10 +526,15 @@ var _ = Describe("scheduledbackup pruneBackupHistory", func() {
 		return names
 	}
 
-	prune := func(ctx context.Context) error {
+	pruneWithMore := func(ctx context.Context) (bool, error) {
 		children, err := r.GetChildBackups(ctx, *sb)
 		Expect(err).ToNot(HaveOccurred())
 		return r.pruneBackupHistory(ctx, sb, children)
+	}
+
+	prune := func(ctx context.Context) error {
+		_, err := pruneWithMore(ctx)
+		return err
 	}
 
 	It("deletes nothing when no limit is set", func(ctx context.Context) {
@@ -562,5 +568,28 @@ var _ = Describe("scheduledbackup pruneBackupHistory", func() {
 		sb.Spec.FailedBackupsHistoryLimit = ptr.To[int32](2)
 		Expect(prune(ctx)).To(Succeed())
 		Expect(remainingBackups(ctx)).To(HaveLen(7))
+	})
+
+	It("caps the deletions per call and reports when backups are left", func(ctx context.Context) {
+		total := maxBackupDeletionsPerReconcile + 5
+		for i := 0; i < total; i++ {
+			b := newBackup(ns, fmt.Sprintf("old-%02d", i), apiv1.BackupPhaseCompleted,
+				time.Duration(100+i)*time.Hour, parent)
+			Expect(cli.Create(ctx, b)).To(Succeed())
+			Expect(cli.Status().Update(ctx, b)).To(Succeed())
+		}
+		sb.Spec.SuccessfulBackupsHistoryLimit = ptr.To[int32](0)
+		// 3 + total completed backups of this parent exist, plus 4 other ones
+		before := len(remainingBackups(ctx))
+
+		more, err := pruneWithMore(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(more).To(BeTrue())
+		Expect(remainingBackups(ctx)).To(HaveLen(before - maxBackupDeletionsPerReconcile))
+
+		more, err = pruneWithMore(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(more).To(BeFalse())
+		Expect(remainingBackups(ctx)).To(ConsistOf("ko-1", "ko-2", "running", "other-parent"))
 	})
 })

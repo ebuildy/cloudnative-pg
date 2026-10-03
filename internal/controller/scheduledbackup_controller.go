@@ -54,6 +54,14 @@ const (
 	// ParentScheduledBackupLabelName label is applied to backups to easily tell the scheduled backup
 	// it was created from.
 	ParentScheduledBackupLabelName = utils.ParentScheduledBackupLabelName
+
+	// maxBackupDeletionsPerReconcile bounds how many Backup objects a single
+	// reconciliation deletes when pruning the history, to keep it short
+	maxBackupDeletionsPerReconcile = 10
+
+	// pruneBackupHistoryRequeueDelay is how long to wait before continuing to
+	// prune when the deletion budget of a reconciliation has been exhausted
+	pruneBackupHistoryRequeueDelay = 5 * time.Second
 )
 
 // ScheduledBackupReconciler reconciles a ScheduledBackup object
@@ -122,7 +130,8 @@ func (r *ScheduledBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	if err := r.pruneBackupHistory(ctx, &scheduledBackup, childBackups); err != nil {
+	morePruningNeeded, err := r.pruneBackupHistory(ctx, &scheduledBackup, childBackups)
+	if err != nil {
 		contextLogger.Error(err, "Cannot prune the backup history")
 		return ctrl.Result{}, err
 	}
@@ -137,7 +146,17 @@ func (r *ScheduledBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	return r.reconcileScheduledBackup(ctx, &scheduledBackup)
+	result, err := r.reconcileScheduledBackup(ctx, &scheduledBackup)
+	if err != nil {
+		return result, err
+	}
+
+	// Come back soon to go on with the pruning, instead of waiting for the next schedule
+	if morePruningNeeded && (result.RequeueAfter == 0 || result.RequeueAfter > pruneBackupHistoryRequeueDelay) {
+		result.RequeueAfter = pruneBackupHistoryRequeueDelay
+	}
+
+	return result, nil
 }
 
 // reconcileScheduledBackup is the main reconciliation logic for a scheduled backup
@@ -413,11 +432,14 @@ func (r *ScheduledBackupReconciler) advanceScheduledBackupStatus(
 // failed backups are counted separately and the newest ones are kept.
 // Backups that are still running are never deleted, and a nil limit means
 // that no backup of that kind is deleted.
+//
+// At most maxBackupDeletionsPerReconcile objects are deleted per call, and the
+// returned boolean tells whether further backups are left to be deleted.
 func (r *ScheduledBackupReconciler) pruneBackupHistory(
 	ctx context.Context,
 	scheduledBackup *apiv1.ScheduledBackup,
 	childBackups []apiv1.Backup,
-) error {
+) (bool, error) {
 	contextLogger := log.FromContext(ctx)
 
 	var completed, failed []apiv1.Backup
@@ -431,6 +453,8 @@ func (r *ScheduledBackupReconciler) pruneBackupHistory(
 	}
 
 	var errs []error
+	deleted := 0
+	hasMore := false
 	for _, group := range []struct {
 		backups []apiv1.Backup
 		limit   *int32
@@ -448,6 +472,12 @@ func (r *ScheduledBackupReconciler) pruneBackupHistory(
 		})
 
 		for i := int(*group.limit); i < len(group.backups); i++ {
+			if deleted >= maxBackupDeletionsPerReconcile {
+				hasMore = true
+				break
+			}
+			deleted++
+
 			backup := &group.backups[i]
 			contextLogger.Info("Deleting backup exceeding the history limit",
 				"backupName", backup.Name, "backupPhase", backup.Status.Phase)
@@ -457,7 +487,7 @@ func (r *ScheduledBackupReconciler) pruneBackupHistory(
 		}
 	}
 
-	return errors.Join(errs...)
+	return hasMore, errors.Join(errs...)
 }
 
 // GetChildBackups gets all the backups created by a certain ScheduledBackup
