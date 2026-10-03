@@ -292,6 +292,29 @@ Controls which Kubernetes object is set as the owner of the backup resource:
 - `self`: The `ScheduledBackup` object becomes the owner
 - `cluster`: The PostgreSQL cluster becomes the owner
 
+### Backup History Limits
+
+By default, a `ScheduledBackup` never deletes the `Backup` objects it creates,
+so they accumulate over time. Use `.spec.successfulBackupsHistoryLimit` and
+`.spec.failedBackupsHistoryLimit` to keep only the most recent ones:
+
+```yaml
+spec:
+  successfulBackupsHistoryLimit: 30
+  failedBackupsHistoryLimit: 5
+```
+
+The oldest finished `Backup` objects beyond each limit are deleted. Running
+backups, and backups not created by this `ScheduledBackup` (such as on-demand
+ones), are never deleted. When a limit is unset, nothing is deleted for that
+kind of backup.
+
+:::info[Important]
+    The history limits only remove the Kubernetes `Backup` objects. They do not
+    delete backup data from the object store or volume snapshots, which remain
+    governed by the retention mechanism of your backup method.
+:::
+
 ## On-Demand Backups
 
 On-demand backups allow you to manually trigger a backup operation at any time

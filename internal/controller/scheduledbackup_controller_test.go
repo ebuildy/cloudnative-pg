@@ -465,3 +465,102 @@ var _ = Describe("scheduledbackup advanceScheduledBackupStatus", func() {
 		Expect(result.RequeueAfter).To(Equal(time.Second))
 	})
 })
+
+var _ = Describe("scheduledbackup pruneBackupHistory", func() {
+	const parent = "sb-test"
+
+	newBackup := func(ns, name string, phase apiv1.BackupPhase, age time.Duration, parentName string) *apiv1.Backup {
+		return &apiv1.Backup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Namespace:         ns,
+				CreationTimestamp: metav1.Time{Time: time.Now().Add(-age)},
+				Labels:            map[string]string{ParentScheduledBackupLabelName: parentName},
+			},
+			Spec:   apiv1.BackupSpec{Cluster: apiv1.LocalObjectReference{Name: "cluster-x"}},
+			Status: apiv1.BackupStatus{Phase: phase},
+		}
+	}
+
+	var (
+		cli client.Client
+		r   *ScheduledBackupReconciler
+		ns  string
+		sb  *apiv1.ScheduledBackup
+	)
+
+	BeforeEach(func(ctx context.Context) {
+		cli = newScheduledBackupTestClient()
+		ns = newFakeNamespace(cli)
+		r = &ScheduledBackupReconciler{Client: cli, Recorder: record.NewFakeRecorder(10)}
+		sb = &apiv1.ScheduledBackup{
+			ObjectMeta: metav1.ObjectMeta{Name: parent, Namespace: ns},
+			Spec: apiv1.ScheduledBackupSpec{
+				Schedule: "0 0 0 * * *",
+				Cluster:  apiv1.LocalObjectReference{Name: "cluster-x"},
+			},
+		}
+
+		for _, b := range []*apiv1.Backup{
+			newBackup(ns, "ok-1", apiv1.BackupPhaseCompleted, 5*time.Hour, parent),
+			newBackup(ns, "ok-2", apiv1.BackupPhaseCompleted, 4*time.Hour, parent),
+			newBackup(ns, "ok-3", apiv1.BackupPhaseCompleted, 3*time.Hour, parent),
+			newBackup(ns, "ko-1", apiv1.BackupPhaseFailed, 2*time.Hour, parent),
+			newBackup(ns, "ko-2", apiv1.BackupPhaseFailed, time.Hour, parent),
+			newBackup(ns, "running", apiv1.BackupPhaseRunning, time.Minute, parent),
+			newBackup(ns, "other-parent", apiv1.BackupPhaseCompleted, 10*time.Hour, "another"),
+		} {
+			Expect(cli.Create(ctx, b)).To(Succeed())
+			Expect(cli.Status().Update(ctx, b)).To(Succeed())
+		}
+	})
+
+	remainingBackups := func(ctx context.Context) []string {
+		var list apiv1.BackupList
+		Expect(cli.List(ctx, &list, client.InNamespace(ns))).To(Succeed())
+		names := make([]string, 0, len(list.Items))
+		for _, b := range list.Items {
+			names = append(names, b.Name)
+		}
+		return names
+	}
+
+	prune := func(ctx context.Context) error {
+		children, err := r.GetChildBackups(ctx, *sb)
+		Expect(err).ToNot(HaveOccurred())
+		return r.pruneBackupHistory(ctx, sb, children)
+	}
+
+	It("deletes nothing when no limit is set", func(ctx context.Context) {
+		Expect(prune(ctx)).To(Succeed())
+		Expect(remainingBackups(ctx)).To(HaveLen(7))
+	})
+
+	It("keeps the newest completed backups and ignores the failed ones", func(ctx context.Context) {
+		sb.Spec.SuccessfulBackupsHistoryLimit = ptr.To[int32](1)
+		Expect(prune(ctx)).To(Succeed())
+		Expect(remainingBackups(ctx)).To(ConsistOf(
+			"ok-3", "ko-1", "ko-2", "running", "other-parent"))
+	})
+
+	It("keeps the newest failed backups and ignores the completed ones", func(ctx context.Context) {
+		sb.Spec.FailedBackupsHistoryLimit = ptr.To[int32](1)
+		Expect(prune(ctx)).To(Succeed())
+		Expect(remainingBackups(ctx)).To(ConsistOf(
+			"ok-1", "ok-2", "ok-3", "ko-2", "running", "other-parent"))
+	})
+
+	It("deletes every finished backup with a limit of 0 but never running or foreign ones", func(ctx context.Context) {
+		sb.Spec.SuccessfulBackupsHistoryLimit = ptr.To[int32](0)
+		sb.Spec.FailedBackupsHistoryLimit = ptr.To[int32](0)
+		Expect(prune(ctx)).To(Succeed())
+		Expect(remainingBackups(ctx)).To(ConsistOf("running", "other-parent"))
+	})
+
+	It("is a no-op when the number of backups is within the limit", func(ctx context.Context) {
+		sb.Spec.SuccessfulBackupsHistoryLimit = ptr.To[int32](3)
+		sb.Spec.FailedBackupsHistoryLimit = ptr.To[int32](2)
+		Expect(prune(ctx)).To(Succeed())
+		Expect(remainingBackups(ctx)).To(HaveLen(7))
+	})
+})

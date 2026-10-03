@@ -3365,6 +3365,16 @@ func (in *ScheduledBackupSpec) DeepCopyInto(out *ScheduledBackupSpec) {
 		**out = **in
 	}
 	in.Cluster.DeepCopyInto(&out.Cluster)
+	if in.SuccessfulBackupsHistoryLimit != nil {
+		in, out := &in.SuccessfulBackupsHistoryLimit, &out.SuccessfulBackupsHistoryLimit
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FailedBackupsHistoryLimit != nil {
+		in, out := &in.FailedBackupsHistoryLimit, &out.FailedBackupsHistoryLimit
+		*out = new(int32)
+		**out = **in
+	}
 	if in.PluginConfiguration != nil {
 		in, out := &in.PluginConfiguration, &out.PluginConfiguration
 		*out = new(BackupPluginConfiguration)

@@ -66,7 +66,7 @@ type ScheduledBackupReconciler struct {
 
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=scheduledbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=scheduledbackups/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=backups,verbs=get;list;create
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=backups,verbs=get;list;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is the main reconciler logic
@@ -119,6 +119,11 @@ func (r *ScheduledBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		contextLogger.Error(err,
 			"Cannot extract the list of created backups")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.pruneBackupHistory(ctx, &scheduledBackup, childBackups); err != nil {
+		contextLogger.Error(err, "Cannot prune the backup history")
 		return ctrl.Result{}, err
 	}
 
@@ -401,6 +406,58 @@ func (r *ScheduledBackupReconciler) advanceScheduledBackupStatus(
 	contextLogger.Info("Next backup schedule", "next", nextBackupTime)
 	r.Recorder.Eventf(scheduledBackup, "Normal", "BackupSchedule", "Next backup scheduled by %v", nextBackupTime)
 	return ctrl.Result{RequeueAfter: nextBackupTime.Sub(now)}, nil
+}
+
+// pruneBackupHistory deletes the finished Backup objects created by the given
+// ScheduledBackup that exceed the configured history limits. Completed and
+// failed backups are counted separately and the newest ones are kept.
+// Backups that are still running are never deleted, and a nil limit means
+// that no backup of that kind is deleted.
+func (r *ScheduledBackupReconciler) pruneBackupHistory(
+	ctx context.Context,
+	scheduledBackup *apiv1.ScheduledBackup,
+	childBackups []apiv1.Backup,
+) error {
+	contextLogger := log.FromContext(ctx)
+
+	var completed, failed []apiv1.Backup
+	for _, backup := range childBackups {
+		switch backup.Status.Phase {
+		case apiv1.BackupPhaseCompleted:
+			completed = append(completed, backup)
+		case apiv1.BackupPhaseFailed:
+			failed = append(failed, backup)
+		}
+	}
+
+	var errs []error
+	for _, group := range []struct {
+		backups []apiv1.Backup
+		limit   *int32
+	}{
+		{completed, scheduledBackup.Spec.SuccessfulBackupsHistoryLimit},
+		{failed, scheduledBackup.Spec.FailedBackupsHistoryLimit},
+	} {
+		if group.limit == nil || len(group.backups) <= int(*group.limit) {
+			continue
+		}
+
+		// Newest first, so that everything after the limit is the oldest
+		sort.Slice(group.backups, func(i, j int) bool {
+			return group.backups[j].CreationTimestamp.Before(&group.backups[i].CreationTimestamp)
+		})
+
+		for i := int(*group.limit); i < len(group.backups); i++ {
+			backup := &group.backups[i]
+			contextLogger.Info("Deleting backup exceeding the history limit",
+				"backupName", backup.Name, "backupPhase", backup.Status.Phase)
+			if err := r.Delete(ctx, backup); err != nil && !apierrs.IsNotFound(err) {
+				errs = append(errs, fmt.Errorf("while deleting backup %s: %w", backup.Name, err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // GetChildBackups gets all the backups created by a certain ScheduledBackup

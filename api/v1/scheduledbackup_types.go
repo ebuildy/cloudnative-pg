@@ -51,6 +51,22 @@ type ScheduledBackupSpec struct {
 	// +optional
 	BackupOwnerReference string `json:"backupOwnerReference,omitempty"`
 
+	// The number of successfully completed backups created by this
+	// ScheduledBackup to retain. Older ones are deleted, newest are kept.
+	// Only the `Backup` objects are removed: the backup data in the object
+	// store or the volume snapshots are managed by the retention mechanism
+	// of the backup method in use. If unset, all backups are kept.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	SuccessfulBackupsHistoryLimit *int32 `json:"successfulBackupsHistoryLimit,omitempty"`
+
+	// The number of failed backups created by this ScheduledBackup to
+	// retain. Older ones are deleted, newest are kept. If unset, all
+	// failed backups are kept.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	FailedBackupsHistoryLimit *int32 `json:"failedBackupsHistoryLimit,omitempty"`
+
 	// The policy to decide which instance should perform this backup. If empty,
 	// it defaults to `cluster.spec.backup.target`.
 	// Available options are empty string, `primary` and `prefer-standby`.

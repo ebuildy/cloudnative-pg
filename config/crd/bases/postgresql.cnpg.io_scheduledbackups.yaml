@@ -75,6 +75,14 @@ spec:
                 x-kubernetes-validations:
                 - message: cluster reference is immutable after creation
                   rule: self == oldSelf
+              failedBackupsHistoryLimit:
+                description: |-
+                  The number of failed backups created by this ScheduledBackup to
+                  retain. Older ones are deleted, newest are kept. If unset, all
+                  failed backups are kept.
+                format: int32
+                minimum: 0
+                type: integer
               immediate:
                 description: If the first backup has to be immediately start after
                   creation or not
@@ -145,6 +153,16 @@ spec:
                   as it includes an additional seconds specifier,
                   see https://pkg.go.dev/github.com/robfig/cron#hdr-CRON_Expression_Format
                 type: string
+              successfulBackupsHistoryLimit:
+                description: |-
+                  The number of successfully completed backups created by this
+                  ScheduledBackup to retain. Older ones are deleted, newest are kept.
+                  Only the `Backup` objects are removed: the backup data in the object
+                  store or the volume snapshots are managed by the retention mechanism
+                  of the backup method in use. If unset, all backups are kept.
+                format: int32
+                minimum: 0
+                type: integer
               suspend:
                 description: If this backup is suspended or not
                 type: boolean
