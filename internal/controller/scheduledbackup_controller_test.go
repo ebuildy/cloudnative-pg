@@ -417,6 +417,64 @@ var _ = Describe("scheduledbackup Reconcile suspend", func() {
 	})
 })
 
+var _ = Describe("scheduledbackup Reconcile history pruning", func() {
+	It("prunes in bounded batches and requeues soon while backups are left", func(ctx context.Context) {
+		cli := newScheduledBackupTestClient()
+		ns := newFakeNamespace(cli)
+
+		// The last check is now, so the daily schedule has nothing due and the
+		// only requeue source is the pruning
+		sb := &apiv1.ScheduledBackup{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb-test", Namespace: ns},
+			Spec: apiv1.ScheduledBackupSpec{
+				Schedule:                      "0 0 0 * * *",
+				Cluster:                       apiv1.LocalObjectReference{Name: "cluster-x"},
+				SuccessfulBackupsHistoryLimit: ptr.To[int32](0),
+			},
+			Status: apiv1.ScheduledBackupStatus{LastCheckTime: &metav1.Time{Time: time.Now()}},
+		}
+		Expect(cli.Create(ctx, sb)).To(Succeed())
+		Expect(cli.Status().Update(ctx, sb)).To(Succeed())
+
+		total := maxBackupDeletionsPerReconcile + 2
+		for i := 0; i < total; i++ {
+			b := &apiv1.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("old-%02d", i),
+					Namespace: ns,
+					Labels:    map[string]string{ParentScheduledBackupLabelName: sb.Name},
+				},
+				Spec: apiv1.BackupSpec{Cluster: apiv1.LocalObjectReference{Name: "cluster-x"}},
+			}
+			Expect(cli.Create(ctx, b)).To(Succeed())
+			b.Status.Phase = apiv1.BackupPhaseCompleted
+			Expect(cli.Status().Update(ctx, b)).To(Succeed())
+		}
+
+		r := &ScheduledBackupReconciler{Client: cli, Recorder: record.NewFakeRecorder(10)}
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: ns}}
+		countBackups := func() int {
+			var list apiv1.BackupList
+			Expect(cli.List(ctx, &list, client.InNamespace(ns))).To(Succeed())
+			return len(list.Items)
+		}
+
+		By("deleting one batch and requeueing shortly", func() {
+			result, err := r.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pruneBackupHistoryRequeueDelay))
+			Expect(countBackups()).To(Equal(total - maxBackupDeletionsPerReconcile))
+		})
+
+		By("finishing the pruning and waiting for the next schedule", func() {
+			result, err := r.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", pruneBackupHistoryRequeueDelay))
+			Expect(countBackups()).To(BeZero())
+		})
+	})
+})
+
 var _ = Describe("scheduledbackup advanceScheduledBackupStatus", func() {
 	It("requeues without error when the status patch hits a Conflict", func(ctx context.Context) {
 		scheme := schemeBuilder.BuildWithAllKnownScheme()

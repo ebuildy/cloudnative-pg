@@ -56,7 +56,8 @@ const (
 	ParentScheduledBackupLabelName = utils.ParentScheduledBackupLabelName
 
 	// maxBackupDeletionsPerReconcile bounds how many Backup objects a single
-	// reconciliation deletes when pruning the history, to keep it short
+	// reconciliation deletes when pruning the history, to keep it short.
+	// Not sure about the cap here
 	maxBackupDeletionsPerReconcile = 10
 
 	// pruneBackupHistoryRequeueDelay is how long to wait before continuing to
